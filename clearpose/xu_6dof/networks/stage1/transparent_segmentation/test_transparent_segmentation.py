@@ -39,7 +39,7 @@ def main(config={"num_classes": 63}):
     args = parser.parse_args()
     config["mask_rcnn_model"] = args.model
     
-    dataset_test = TransparentSegmentationDataset(dataset_name='test', transforms=get_transform(train=False), ratio=0.01)
+    dataset_test = TransparentSegmentationDataset(dataset_name='test', data_root=args.root, transforms=get_transform(train=False), ratio=0.01)
 
     data_loader_test = torch.utils.data.DataLoader(dataset_test, batch_size=1, shuffle=False, num_workers=4, collate_fn=collate_fn)
 

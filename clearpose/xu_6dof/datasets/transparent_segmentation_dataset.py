@@ -9,8 +9,10 @@ import glob
 
 
 class TransparentSegmentationDataset(Dataset):
-	def __init__(self, data_root="Data/", object_list="Data/model/objects.csv", dataset_name='train', transforms=None, ratio=1):
+	def __init__(self, data_root="Data/", dataset_name='train', transforms=None, ratio=1):
+		print(data_root)
 		assert dataset_name in ['train', 'val', 'test']
+		object_list = data_root + 'model/objects.csv'
 		self.data_root = data_root
 		self.dataset_name = dataset_name
 		if self.dataset_name == 'train':
