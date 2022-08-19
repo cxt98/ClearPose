@@ -2,93 +2,73 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import torch
-from torchvision.utils import draw_bounding_boxes
+from PIL import Image
+import argparse
 import torchvision.transforms.functional as F
 
-from clearpose.xu_6dof.networks.references.detection.engine import train_one_epoch, evaluate
-import clearpose.xu_6dof.networks.references.detection.utils as utils
 import clearpose.xu_6dof.networks.references.detection.transforms as T
-
 from clearpose.xu_6dof.networks.stage1.transparent_segmentation.mask_rcnn import build_model
 from clearpose.xu_6dof.datasets.transparent_segmentation_dataset import TransparentSegmentationDataset
 
 
+def collate_fn(batch):
+    return tuple(zip(*batch))
 
 def get_transform(train):
-	transforms = []
-	transforms.append(T.ToTensor())
-	if train:
-		transforms.append(T.RandomHorizontalFlip(0.5))
-	return T.Compose(transforms)
+    transforms = []
+    transforms.append(T.ToTensor())
+    if train:
+        transforms.append(T.RandomHorizontalFlip(0.5))
+    return T.Compose(transforms)
 
+def main(config={"num_classes": 63}):
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-def show(imgs,titles):
-	if not isinstance(imgs, list):
-		imgs = [imgs]
-	fix, axs = plt.subplots(ncols=len(imgs), squeeze=False)
-	for i, (img,title) in enumerate(zip(imgs,titles)):
-		img = img.detach()
-		img = F.to_pil_image(img)
-		axs[0, i].imshow(np.asarray(img))
-		axs[0, i].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
-		axs[0, i].set_title(title)
-	plt.show()
+    parser = argparse.ArgumentParser(description="Arg parser for SegmentationDataset")
+    parser.add_argument(
+        "-pixelthreshold", type=int, default = 200, help="minimal bbx pixel area for selecting as training sample"
+    )
+    parser.add_argument(
+        "-root", type=str, default="./data/clearpose", help="path to root dataset directory"
+    )
+    parser.add_argument(
+        "-model", type=str, default="./ClearPose/experiments/xu_6dof/stage1/transparent_segmentation/models/mask_rcnn_28.pt", help="path to root dataset directory"
+    )
 
-def main():
-	# train on the GPU or on the CPU, if a GPU is not available
-	device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    #### For the dataset 
+    args = parser.parse_args()
+    config["mask_rcnn_model"] = args.model
+    
+    dataset_test = TransparentSegmentationDataset(dataset_name='test', transforms=get_transform(train=False), ratio=0.01)
 
-	# use our dataset and defined transformations
-	dataset = TransparentSegmentationDataset(image_list="./data/test_images.csv", transforms=get_transform(train=True))
-	dataset_test = TransparentSegmentationDataset(image_list="./data/test_images.csv", transforms=get_transform(train=False))
+    data_loader_test = torch.utils.data.DataLoader(dataset_test, batch_size=1, shuffle=False, num_workers=4, collate_fn=collate_fn)
 
-	# split the dataset in train and test set
-	indices = torch.randperm(len(dataset)).tolist()
-	dataset = torch.utils.data.Subset(dataset, indices[:-50])
-	dataset_test = torch.utils.data.Subset(dataset_test, indices[-50:])
+    model = build_model(config)
+    model.load_state_dict(torch.load(config["mask_rcnn_model"])['model_state_dict'], strict=False)
+    model.eval()
+    model.to(device)
+    
+    cpu_device = torch.device("cpu")
 
-	# define training and validation data loaders
-	data_loader = torch.utils.data.DataLoader(
-		dataset, batch_size=4, shuffle=True, num_workers=4,
-		collate_fn=utils.collate_fn)
+    iou = []
 
-	data_loader_test = torch.utils.data.DataLoader(
-		dataset_test, batch_size=1, shuffle=False, num_workers=4,
-		collate_fn=utils.collate_fn)
+    for images, targets in data_loader_test:
+        images = list(img.to(device) for img in images)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        outputs = model(images)
+        outputs = [{k: v.to(cpu_device) for k, v in t.items()} for t in outputs]
+        masks = outputs[0]['masks'][outputs[0]['masks'].sum(1).sum(1).sum(1)<100000]
+        mask = (masks.sum(0)>0.5).cpu().numpy()[0].astype('uint8')*255
 
-	# get the model using our helper function
-	model = build_model({"num_classes": 63})
-
-	model.load_state_dict(torch.load("./experiments/xu_6dof/stage1/transparent_segmentation/models/mask_rcnn_0.pt"), strict=False)
-	model.to(device)
-
-	# evaluate(model, data_loader_test, device=device)
-
-
-
-
-	model.eval()
-	cpu_device = torch.device("cpu")
-
-	for images, targets in data_loader_test:
-		images = list(img.to(device) for img in images)
-
-		if torch.cuda.is_available():
-			torch.cuda.synchronize()
-		outputs = model(images)
-
-		outputs = [{k: v.to(cpu_device) for k, v in t.items()} for t in outputs]
-
-
-		target_plot = draw_bounding_boxes((255*images[0]).type(torch.uint8).cpu(), targets[0]['boxes'], width=1)
-		box_plot = draw_bounding_boxes((255*images[0]).type(torch.uint8).cpu(), outputs[0]['boxes'], width=1)
-		masks = outputs[0]['masks'][outputs[0]['masks'].sum(1).sum(1).sum(1)<100000]
-		masks = (masks.sum(0)>0.5)
-		mask_plot = draw_bounding_boxes(255*masks.detach().cpu().type(torch.uint8), outputs[0]['boxes'], width=1)
-		alpha_plot = draw_bounding_boxes((255*images[0]).type(torch.uint8).cpu()*masks.detach().cpu().type(torch.uint8), outputs[0]['boxes'], width=1)
-		show([target_plot, alpha_plot],['Ground Truth','Predictions'])
-	
-
+        image_path = targets[0]['image_path']
+        Image.fromarray(mask).save(image_path.replace('color', 'label-predict'))
+        print(image_path)
+        mask = mask.astype(bool)
+        gt_mask = np.array(Image.open(image_path.replace('color', 'label'))).astype(bool)
+        iou.append(np.sum(gt_mask & mask) / np.sum(gt_mask | mask))
+        
+    print('IoU,', np.mean(iou), np.std(iou))
 
 if __name__=="__main__":
-	main()
+    main()
